@@ -26,6 +26,9 @@ def handle_image(data):
         
         if frame is None: return
 
+        # Definir parámetros de procesamiento
+        params = { 'min_area': 1000 }
+        
         # Obtenemos puntos de objetos, el camino y la imagen de debug
         points_data, path_points, debug_img = processor.process_frame(frame, params)
         
