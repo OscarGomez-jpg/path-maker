@@ -4,42 +4,48 @@ import cv2
 import base64
 import numpy as np
 from processor import DepthProcessor
+import socket
+import os
 
-"""Path-Maker Server.
+"""Path-Maker Server with Auto-IP Detection.
 
-This module provides a Flask-SocketIO server that receives images from a 
-remote client (mobile phone), processes them using the Robot Navigator 
-(FastSAM), and sends back object vertices and a safe navigation path.
+This module provides a Flask-SocketIO server that auto-detects its local IP
+address to facilitate connections over mobile hotspots or different Wi-Fi networks.
 """
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "path-maker-secret!"
-# Increase max packet size to support high-frequency image streaming
 socketio = SocketIO(app, cors_allowed_origins="*", max_decode_packets=1000000)
 
-# Initialize the FastSAM processor
 processor = DepthProcessor()
+
+
+def get_local_ip():
+    """Detects the current local IP address of the machine.
+
+    Returns:
+        str: The local IP address (e.g., '192.168.43.10').
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Connect to an external IP (doesn't send data) to find local interface
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
 
 
 @app.route("/")
 def index():
-    """Renders the main mobile interface."""
     return render_template("index.html")
 
 
 @socketio.on("image")
 def handle_image(data):
-    """Processes incoming camera frames from the client.
-
-    Decodes the base64 image, runs navigation logic, displays a monitoring
-    dashboard on the PC, and emits the calculated path and obstacles back
-    to the mobile device.
-
-    Args:
-        data: Base64 encoded JPEG image string.
-    """
     try:
-        # Decode base64 image from client
         header, encoded = data.split(",", 1)
         nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -48,17 +54,13 @@ def handle_image(data):
             return
 
         params = {"min_area": 1000}
-
-        # Returns: detected object points, safe path nodes, and debug image
         points_data, path_points, debug_img = processor.process_frame(frame, params)
 
-        # PC Dashboard Visualization
         h, w = frame.shape[:2]
         d_res = cv2.resize(debug_img, (w, h))
-        cv2.imshow("Path-Maker Server Monitoring (FastSAM)", d_res)
+        cv2.imshow("Path-Maker Server (Navigator Mode)", d_res)
         cv2.waitKey(1)
 
-        # Emit results back to mobile client
         emit("response", {"points": points_data, "path": path_points})
 
     except Exception as e:
@@ -66,19 +68,24 @@ def handle_image(data):
 
 
 if __name__ == "__main__":
-    """Initializes the server with an ad-hoc SSL certificate for mobile camera access."""
-    print("Path-Maker Server starting in HTTPS mode.")
-    print("Connect your device to: https://192.168.1.11:5000")
+    # 1. AUTO-DETECT CURRENT IP
+    current_ip = get_local_ip()
 
-    # MANUAL SSL GENERATION FOR GEVENT
-    # Mobile browsers require HTTPS to enable the camera API (navigator.mediaDevices)
+    print("\n" + "=" * 50)
+    print("PATH-MAKER SERVER ACTIVE")
+    print("Network Mode: Local Network / Hotspot")
+    print(f"Target URL: https://{current_ip}:5000")
+    print("=" * 50 + "\n")
+
+    # 2. GENERATE DYNAMIC SSL CERTIFICATE FOR THIS IP
     from OpenSSL import crypto
     import tempfile
 
     key = crypto.PKey()
     key.generate_key(crypto.TYPE_RSA, 2048)
     cert = crypto.X509()
-    cert.get_subject().CN = "192.168.1.11"
+    # Use the detected IP as the Common Name (CN)
+    cert.get_subject().CN = current_ip
     cert.set_serial_number(1000)
     cert.gmtime_adj_notBefore(0)
     cert.gmtime_adj_notAfter(31536000)
@@ -86,7 +93,6 @@ if __name__ == "__main__":
     cert.set_pubkey(key)
     cert.sign(key, "sha256")
 
-    # Create temporary files for the SSL credentials
     with (
         tempfile.NamedTemporaryFile(delete=False) as cert_file,
         tempfile.NamedTemporaryFile(delete=False) as key_file,
